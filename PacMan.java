@@ -62,8 +62,11 @@ public class PacMan extends JPanel implements ActionListener, KeyListener {
             }
         }
 
+        // Subclasses can override this to set a different speed
+        int speed() { return tileSize / 4; } // Pac-Man default: 8px/tick
+
         void updateVelocity() {
-            int spd = tileSize / 4;
+            int spd = speed();
             velocityX = 0; velocityY = 0;
             switch (direction) {
                 case 'U' -> velocityY = -spd;
@@ -135,10 +138,18 @@ public class PacMan extends JPanel implements ActionListener, KeyListener {
         }
 
         Image normalImage; // set after construction
+
+        @Override
+        int speed() {
+            // 4px/tick = exactly 8 steps per tile (tileSize=32) → always lands on tile boundaries
+            // Pac-Man is 8px/tick so player is 2x faster — fair and fun
+            // Scared ghosts drop to 2px/tick — very easy to catch
+            return scared ? 2 : 4;
+        }
     }
     Statistics stats = new Statistics();
 
-boolean USE_BFS = true;
+boolean USE_BFS = false;
     // ── Board constants ───────────────────────────────────────────────────────
     private static final int ROW_COUNT    = 21;
     private static final int COLUMN_COUNT = 19;
@@ -199,7 +210,8 @@ boolean USE_BFS = true;
     int highScore= 0;
     int lives    = 3;
     boolean gameOver = false;
-    int ghostEatMultiplier = 1; // doubles per ghost eaten in one power-pellet
+    int ghostEatMultiplier = 1;
+    char bufferedDir = ' '; // stores the last key pressed; applied when Pac-Man is grid-aligned
 
     private static final String HIGH_SCORE_FILE = "highscore.txt";
 
@@ -334,6 +346,22 @@ boolean USE_BFS = true;
 
     // ── Movement & logic ──────────────────────────────────────────────────────
     public void move() {
+        // ── Apply buffered turn when Pac-Man is aligned to the grid ──
+        // This lets the player queue a turn slightly early — it fires the moment
+        // Pac-Man reaches the next junction, making controls feel responsive.
+        if (bufferedDir != ' ' &&
+            pacman.x % tileSize == 0 && pacman.y % tileSize == 0) {
+            pacman.updateDirection(bufferedDir);
+            pacman.image = switch (pacman.direction) {
+                case 'U' -> pacmanUpImage;
+                case 'D' -> pacmanDownImage;
+                case 'L' -> pacmanLeftImage;
+                default  -> pacmanRightImage;
+            };
+            // Only clear buffer if the turn actually succeeded
+            if (pacman.direction == bufferedDir) bufferedDir = ' ';
+        }
+
         // ── Pac-Man movement ──
         pacman.x += pacman.velocityX;
         pacman.y += pacman.velocityY;
@@ -403,10 +431,8 @@ for (Block wall : walls) {
     }
 }
 
-// Every time the ghost reaches a new tile,
-// compute the next direction.
-if (ghost.x % tileSize == 0 &&
-    ghost.y % tileSize == 0) {
+// Every time the ghost reaches a new tile, compute the next direction.
+if (ghost.x % tileSize == 0 && ghost.y % tileSize == 0) {
 
     char nextDirection;
 
@@ -467,7 +493,9 @@ if (ghost.x % tileSize == 0 &&
 
     stats.stop();
 
-    stats.print(USE_BFS ? "BFS" : "Random");
+    String mode = USE_BFS ? "BFS" : "Random";
+    stats.print(mode);
+    stats.saveToCSV(mode);   // ← appends one row to pacman_stats.csv
 
     updateHighScore();
 
@@ -480,12 +508,16 @@ if (ghost.x % tileSize == 0 &&
     // ── BFS: find best direction for ghost to move toward target tile ─────────
     private char bfsDirection(Ghost ghost, int[] targetTile) {
         stats.recordBFSCall();
-        int startCol = ghost.x / tileSize;
-        int startRow = ghost.y / tileSize;
-        int goalCol  = clamp(targetTile[0], 0, columnCount - 1);
-        int goalRow  = clamp(targetTile[1], 0, rowCount    - 1);
 
-        // Mark walls
+        int startCol = clamp(ghost.x / tileSize, 0, columnCount - 1);
+        int startRow = clamp(ghost.y / tileSize, 0, rowCount    - 1);
+        int goalCol  = clamp(targetTile[0],       0, columnCount - 1);
+        int goalRow  = clamp(targetTile[1],       0, rowCount    - 1);
+
+        // Already there — keep current direction
+        if (startRow == goalRow && startCol == goalCol) return ghost.direction;
+
+        // Build wall grid
         boolean[][] blocked = new boolean[rowCount][columnCount];
         for (Block w : walls) {
             int wr = w.y / tileSize, wc = w.x / tileSize;
@@ -493,51 +525,53 @@ if (ghost.x % tileSize == 0 &&
                 blocked[wr][wc] = true;
         }
 
-        // BFS
-        int[][] prev = new int[rowCount * columnCount][2];
-        for (int[] p : prev) Arrays.fill(p, -1);
-        Queue<int[]> queue = new LinkedList<>();
-        queue.add(new int[]{startRow, startCol});
-        boolean[][] visited = new boolean[rowCount][columnCount];
-        visited[startRow][startCol] = true;
-
         int[][] deltas = {{-1,0},{1,0},{0,-1},{0,1}};
         char[]  dirMap = {'U','D','L','R'};
 
+        // BFS — each queue entry carries {row, col, firstDir}
+        // firstDir = index into dirMap of the direction taken from the start node
+        // This eliminates traceback entirely and avoids all index-out-of-bounds risk.
+        boolean[][] visited = new boolean[rowCount][columnCount];
+        visited[startRow][startCol] = true;
+
+        // Queue entries: [row, col, firstDirIndex]  (-1 = not yet set, i.e. start node)
+        Queue<int[]> queue = new LinkedList<>();
+
+        // Seed with the 4 neighbours of the start node
+        for (int i = 0; i < 4; i++) {
+            int nr = startRow + deltas[i][0];
+            int nc = startCol + deltas[i][1];
+            if (nc < 0) nc = columnCount - 1;
+            else if (nc >= columnCount) nc = 0;
+            if (nr < 0 || nr >= rowCount) continue;
+            if (!visited[nr][nc] && !blocked[nr][nc]) {
+                visited[nr][nc] = true;
+                queue.add(new int[]{nr, nc, i}); // i = first direction index
+            }
+        }
+
         while (!queue.isEmpty()) {
             int[] cur = queue.poll();
-            int r = cur[0], c = cur[1];
-            if (r == goalRow && c == goalCol) break;
+            int r = cur[0], c = cur[1], firstDirIdx = cur[2];
+
+            if (r == goalRow && c == goalCol) {
+                return dirMap[firstDirIdx]; // ← found, return direction of first step
+            }
+
             for (int i = 0; i < 4; i++) {
                 int nr = r + deltas[i][0];
                 int nc = c + deltas[i][1];
-                // Wrap columns for tunnel
                 if (nc < 0) nc = columnCount - 1;
                 else if (nc >= columnCount) nc = 0;
                 if (nr < 0 || nr >= rowCount) continue;
                 if (!visited[nr][nc] && !blocked[nr][nc]) {
                     visited[nr][nc] = true;
-                    prev[nr * columnCount + nc] = new int[]{r, c};
-                    queue.add(new int[]{nr, nc});
+                    queue.add(new int[]{nr, nc, firstDirIdx}); // propagate first direction
                 }
             }
         }
 
-        // Trace back to find first step from start
-        int r = goalRow, c = goalCol;
-        if (prev[r * columnCount + c][0] == -1) return randomDir(ghost); // no path
-        while (true) {
-            int[] p = prev[r * columnCount + c];
-            if (p[0] == startRow && p[1] == startCol) {
-                // (r,c) is the first step
-                for (int i = 0; i < 4; i++) {
-                    if (startRow + deltas[i][0] == r && startCol + deltas[i][1] == c)
-                        return dirMap[i];
-                }
-                break;
-            }
-            r = p[0]; c = p[1];
-        }
+        // Goal unreachable — fall back to random
         return randomDir(ghost);
     }
 
@@ -599,28 +633,25 @@ if (ghost.x % tileSize == 0 &&
     }
 
     // ── Keyboard input ────────────────────────────────────────────────────────
-    @Override public void keyTyped(KeyEvent e)   {}
-    @Override public void keyPressed(KeyEvent e) {}
+    @Override public void keyTyped(KeyEvent e) {}
 
     @Override
-    public void keyReleased(KeyEvent e) {
+    public void keyPressed(KeyEvent e) {
         if (gameOver) {
             loadMap(); resetPositions();
             lives = 3; score = 0; gameOver = false;
+            bufferedDir = ' ';
+            stats.start(); // resets all counters for the new game
             gameLoop.start();
             return;
         }
         switch (e.getKeyCode()) {
-            case KeyEvent.VK_UP    -> pacman.updateDirection('U');
-            case KeyEvent.VK_DOWN  -> pacman.updateDirection('D');
-            case KeyEvent.VK_LEFT  -> pacman.updateDirection('L');
-            case KeyEvent.VK_RIGHT -> pacman.updateDirection('R');
+            case KeyEvent.VK_UP    -> bufferedDir = 'U';
+            case KeyEvent.VK_DOWN  -> bufferedDir = 'D';
+            case KeyEvent.VK_LEFT  -> bufferedDir = 'L';
+            case KeyEvent.VK_RIGHT -> bufferedDir = 'R';
         }
-        pacman.image = switch (pacman.direction) {
-            case 'U' -> pacmanUpImage;
-            case 'D' -> pacmanDownImage;
-            case 'L' -> pacmanLeftImage;
-            default  -> pacmanRightImage;
-        };
     }
+
+    @Override public void keyReleased(KeyEvent e) {}
 }
