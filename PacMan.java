@@ -44,6 +44,9 @@ public class PacMan extends JPanel implements ActionListener, KeyListener {
 
         void updateDirection(char dir) {
             char prev = this.direction;
+            if(this.direction!=dir){
+    stats.recordDirectionChange();
+}
             this.direction = dir;
             updateVelocity();
             this.x += this.velocityX;
@@ -133,7 +136,9 @@ public class PacMan extends JPanel implements ActionListener, KeyListener {
 
         Image normalImage; // set after construction
     }
+    Statistics stats = new Statistics();
 
+boolean USE_BFS = true;
     // ── Board constants ───────────────────────────────────────────────────────
     private static final int ROW_COUNT    = 21;
     private static final int COLUMN_COUNT = 19;
@@ -209,6 +214,7 @@ public class PacMan extends JPanel implements ActionListener, KeyListener {
         loadHighScore();
         loadMap();
         startGhosts();
+        stats.start();
 
         gameLoop = new Timer(50, this); // 20 fps
         gameLoop.start();
@@ -357,6 +363,11 @@ public class PacMan extends JPanel implements ActionListener, KeyListener {
 
         // ── Ghost movement (BFS pathfinding) ──
         for (Ghost ghost : ghosts) {
+            double distance = Math.hypot(
+        ghost.x-pacman.x,
+        ghost.y-pacman.y);
+stats.recordDistance(distance);
+
             ghost.tickScared();
 
             if (collision(ghost, pacman)) {
@@ -378,21 +389,47 @@ public class PacMan extends JPanel implements ActionListener, KeyListener {
             else if (ghost.x > boardWidth)    ghost.x = -ghost.width;
 
             // Wall collision → BFS to find new direction
-            boolean hitWall = false;
-            for (Block wall : walls) {
-                if (collision(ghost, wall)) {
-                    ghost.x -= ghost.velocityX;
-                    ghost.y -= ghost.velocityY;
-                    hitWall = true;
-                    break;
-                }
-            }
-            if (hitWall) {
-                char bestDir = ghost.scared
-                    ? randomDir(ghost)
-                    : bfsDirection(ghost, ghost.getTarget());
-                ghost.updateDirection(bestDir);
-            }
+           // Check wall collisions
+for (Block wall : walls) {
+
+    if (collision(ghost, wall)) {
+
+        ghost.x -= ghost.velocityX;
+        ghost.y -= ghost.velocityY;
+
+        stats.recordWallHit();
+
+        break;
+    }
+}
+
+// Every time the ghost reaches a new tile,
+// compute the next direction.
+if (ghost.x % tileSize == 0 &&
+    ghost.y % tileSize == 0) {
+
+    char nextDirection;
+
+    if (ghost.scared) {
+
+        nextDirection = randomDir(ghost);
+
+    }
+    else if (USE_BFS) {
+
+        nextDirection = bfsDirection(
+                ghost,
+                ghost.getTarget());
+
+    }
+    else {
+
+        nextDirection = randomDir(ghost);
+
+    }
+
+    ghost.updateDirection(nextDirection);
+}
         }
 
         // ── Food collection ──
@@ -424,17 +461,25 @@ public class PacMan extends JPanel implements ActionListener, KeyListener {
             ghost.image = ghost.normalImage;
         } else {
             lives--;
-            if (lives == 0) {
-                gameOver = true;
-                updateHighScore();
-                return;
-            }
+            if(lives==0){
+
+    gameOver=true;
+
+    stats.stop();
+
+    stats.print(USE_BFS ? "BFS" : "Random");
+
+    updateHighScore();
+
+    return;
+}
             resetPositions();
         }
     }
 
     // ── BFS: find best direction for ghost to move toward target tile ─────────
     private char bfsDirection(Ghost ghost, int[] targetTile) {
+        stats.recordBFSCall();
         int startCol = ghost.x / tileSize;
         int startRow = ghost.y / tileSize;
         int goalCol  = clamp(targetTile[0], 0, columnCount - 1);
