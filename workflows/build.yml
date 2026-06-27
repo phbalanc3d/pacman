@@ -1,0 +1,28 @@
+name: Build & Test
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Compile game
+        run: javac SimRunner.java Statistics.java
+
+      - name: Run headless simulation (smoke test)
+        run: java SimRunner
+
+      - name: Run unit tests
+        run: |
+          wget -q https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.1/junit-platform-console-standalone-1.10.1.jar
+          javac -cp junit-platform-console-standalone-1.10.1.jar PacManTest.java SimRunner.java
+          java -cp .:junit-platform-console-standalone-1.10.1.jar \
+               org.junit.platform.console.ConsoleLauncher \
+               --select-class=PacManTest \
+               --fail-if-no-tests
